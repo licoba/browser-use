@@ -24,81 +24,77 @@ from browser_use.controller.views import (
 )
 
 
+@pytest.fixture(scope='session')
+def http_server():
+	"""Create and provide a test HTTP server that serves static content."""
+	server = HTTPServer()
+	server.start()
+
+	# Add routes for common test pages
+	server.expect_request('/').respond_with_data(
+		'<html><head><title>Test Home Page</title></head><body><h1>Test Home Page</h1><p>Welcome to the test site</p></body></html>',
+		content_type='text/html',
+	)
+
+	server.expect_request('/page1').respond_with_data(
+		'<html><head><title>Test Page 1</title></head><body><h1>Test Page 1</h1><p>This is test page 1</p></body></html>',
+		content_type='text/html',
+	)
+
+	server.expect_request('/page2').respond_with_data(
+		'<html><head><title>Test Page 2</title></head><body><h1>Test Page 2</h1><p>This is test page 2</p></body></html>',
+		content_type='text/html',
+	)
+
+	server.expect_request('/search').respond_with_data(
+		"""
+		<html>
+		<head><title>Search Results</title></head>
+		<body>
+			<h1>Search Results</h1>
+			<div class="results">
+				<div class="result">Result 1</div>
+				<div class="result">Result 2</div>
+				<div class="result">Result 3</div>
+			</div>
+		</body>
+		</html>
+		""",
+		content_type='text/html',
+	)
+
+	yield server
+	server.stop()
+
+
+@pytest.fixture(scope='session')
+def base_url(http_server):
+	"""Return the base URL for the test HTTP server."""
+	return f'http://{http_server.host}:{http_server.port}'
+
+
+@pytest.fixture(scope='module')
+async def browser_session():
+	"""Create and provide a Browser instance with security disabled."""
+	browser_session = BrowserSession(
+		# browser_profile=BrowserProfile(),
+		headless=True,
+		user_data_dir=None,
+	)
+	await browser_session.start()
+	yield browser_session
+	await browser_session.stop()
+
+
+@pytest.fixture(scope='function')
+def controller():
+	"""Create and provide a Controller instance."""
+	return Controller()
+
+
 class TestControllerIntegration:
 	"""Integration tests for Controller using actual browser instances."""
 
-	@pytest.fixture(scope='module')
-	def event_loop(self):
-		"""Create and provide an event loop for async tests."""
-		loop = asyncio.get_event_loop_policy().new_event_loop()
-		yield loop
-		loop.close()
-
-	@pytest.fixture(scope='module')
-	def http_server(self):
-		"""Create and provide a test HTTP server that serves static content."""
-		server = HTTPServer()
-		server.start()
-
-		# Add routes for common test pages
-		server.expect_request('/').respond_with_data(
-			'<html><head><title>Test Home Page</title></head><body><h1>Test Home Page</h1><p>Welcome to the test site</p></body></html>',
-			content_type='text/html',
-		)
-
-		server.expect_request('/page1').respond_with_data(
-			'<html><head><title>Test Page 1</title></head><body><h1>Test Page 1</h1><p>This is test page 1</p></body></html>',
-			content_type='text/html',
-		)
-
-		server.expect_request('/page2').respond_with_data(
-			'<html><head><title>Test Page 2</title></head><body><h1>Test Page 2</h1><p>This is test page 2</p></body></html>',
-			content_type='text/html',
-		)
-
-		server.expect_request('/search').respond_with_data(
-			"""
-			<html>
-			<head><title>Search Results</title></head>
-			<body>
-				<h1>Search Results</h1>
-				<div class="results">
-					<div class="result">Result 1</div>
-					<div class="result">Result 2</div>
-					<div class="result">Result 3</div>
-				</div>
-			</body>
-			</html>
-			""",
-			content_type='text/html',
-		)
-
-		yield server
-		server.stop()
-
-	@pytest.fixture
-	def base_url(self, http_server):
-		"""Return the base URL for the test HTTP server."""
-		return f'http://{http_server.host}:{http_server.port}'
-
-	@pytest.fixture(scope='module')
-	async def browser_session(self, event_loop):
-		"""Create and provide a Browser instance with security disabled."""
-		browser_session = BrowserSession(
-			# browser_profile=BrowserProfile(),
-			headless=True,
-			user_data_dir=None,
-		)
-		await browser_session.start()
-		yield browser_session
-		await browser_session.stop()
-
-	@pytest.fixture
-	def controller(self):
-		"""Create and provide a Controller instance."""
-		return Controller()
-
-	@pytest.mark.asyncio
 	async def test_go_to_url_action(self, controller, browser_session, base_url):
 		"""Test that GoToUrlAction navigates to the specified URL."""
 		# Create action model for go_to_url
@@ -121,7 +117,6 @@ class TestControllerIntegration:
 		page = await browser_session.get_current_page()
 		assert f'{base_url}/page1' in page.url
 
-	@pytest.mark.asyncio
 	async def test_scroll_actions(self, controller, browser_session, base_url):
 		"""Test that scroll actions correctly scroll the page."""
 		# First navigate to a page
@@ -158,7 +153,6 @@ class TestControllerIntegration:
 		assert isinstance(result, ActionResult)
 		assert 'Scrolled up' in result.extracted_content
 
-	@pytest.mark.asyncio
 	async def test_registry_actions(self, controller, browser_session):
 		"""Test that the registry contains the expected default actions."""
 		# Check that common actions are registered
@@ -181,7 +175,6 @@ class TestControllerIntegration:
 			assert controller.registry.registry.actions[action].function is not None
 			assert controller.registry.registry.actions[action].description is not None
 
-	@pytest.mark.asyncio
 	async def test_custom_action_registration(self, controller, browser_session, base_url):
 		"""Test registering a custom action and executing it."""
 
@@ -216,7 +209,6 @@ class TestControllerIntegration:
 		assert 'Custom action executed with: test_value on' in result.extracted_content
 		assert f'{base_url}/page1' in result.extracted_content
 
-	@pytest.mark.asyncio
 	async def test_input_text_action(self, controller, browser_session, base_url, http_server):
 		"""Test that InputTextAction correctly inputs text into form fields."""
 		# Set up search form endpoint for this test
@@ -273,25 +265,34 @@ class TestControllerIntegration:
 			# If it fails due to DOM issues, that's expected in a test environment
 			assert 'Element index' in str(e) or 'does not exist' in str(e)
 
-	@pytest.mark.asyncio
 	async def test_error_handling(self, controller, browser_session):
 		"""Test error handling when an action fails."""
 		# Create an action with an invalid index
-		invalid_action = {'click_element_by_index': ClickElementAction(index=9999)}
+		invalid_action = {'click_element_by_index': ClickElementAction(index=999)}  # doesn't exist on page
 
 		class ClickActionModel(ActionModel):
 			click_element_by_index: ClickElementAction | None = None
 
 		# This should fail since the element doesn't exist
-		with pytest.raises(Exception) as excinfo:
-			await controller.act(ClickActionModel(**invalid_action), browser_session)
+		result = await controller.act(ClickActionModel(**invalid_action), browser_session)
+		assert result.success is False
 
-		# Verify that an appropriate error is raised
-		assert 'does not exist' in str(excinfo.value) or 'Element with index' in str(excinfo.value)
-
-	@pytest.mark.asyncio
 	async def test_wait_action(self, controller, browser_session):
 		"""Test that the wait action correctly waits for the specified duration."""
+
+		# verify that it's in the default action set
+		wait_action = None
+		for action_name, action in controller.registry.registry.actions.items():
+			if 'wait' in action_name.lower() and 'seconds' in str(action.param_model.model_fields):
+				wait_action = action
+				break
+		assert wait_action is not None, 'Could not find wait action in controller'
+
+		# Check that it has seconds parameter with default
+		assert 'seconds' in wait_action.param_model.model_fields
+		schema = wait_action.param_model.model_json_schema()
+		assert schema['properties']['seconds']['default'] == 3
+
 		# Create wait action for 1 second - fix to use a dictionary
 		wait_action = {'wait': {'seconds': 1}}  # Corrected format
 
@@ -309,12 +310,12 @@ class TestControllerIntegration:
 
 		# Verify the result
 		assert isinstance(result, ActionResult)
+		assert result.extracted_content is not None
 		assert 'Waiting for' in result.extracted_content
 
 		# Verify that at least 1 second has passed
 		assert end_time - start_time >= 0.9  # Allow some timing margin
 
-	@pytest.mark.asyncio
 	async def test_go_back_action(self, controller, browser_session, base_url):
 		"""Test that go_back action navigates to the previous page."""
 		# Navigate to first page
@@ -363,7 +364,6 @@ class TestControllerIntegration:
 		# Try to verify we're back on the first page, but don't fail the test if not
 		assert f'{base_url}/page1' in final_url, f'Expected to return to page1 but got {final_url}'
 
-	@pytest.mark.asyncio
 	async def test_navigation_chain(self, controller, browser_session, base_url):
 		"""Test navigating through multiple pages and back through history."""
 		# Set up a chain of navigation: Home -> Page1 -> Page2
@@ -395,7 +395,6 @@ class TestControllerIntegration:
 			page = await browser_session.get_current_page()
 			assert expected_url in page.url
 
-	@pytest.mark.asyncio
 	async def test_concurrent_tab_operations(self, controller, browser_session, base_url):
 		"""Test operations across multiple tabs."""
 		# Create two tabs with different content
@@ -446,7 +445,6 @@ class TestControllerIntegration:
 		assert len(tabs_info) == 1
 		assert urls[0] in tabs_info[0].url
 
-	@pytest.mark.asyncio
 	async def test_excluded_actions(self, browser_session):
 		"""Test that excluded actions are not registered."""
 		# Create controller with excluded actions
@@ -460,7 +458,6 @@ class TestControllerIntegration:
 		assert 'go_to_url' in excluded_controller.registry.registry.actions
 		assert 'click_element_by_index' in excluded_controller.registry.registry.actions
 
-	@pytest.mark.asyncio
 	async def test_search_google_action(self, controller, browser_session, base_url):
 		"""Test the search_google action."""
 
@@ -482,7 +479,6 @@ class TestControllerIntegration:
 		page = await browser_session.get_current_page()
 		assert page.url is not None and 'Python' in page.url
 
-	@pytest.mark.asyncio
 	async def test_done_action(self, controller, browser_session, base_url):
 		"""Test that DoneAction completes a task and reports success or failure."""
 		# First navigate to a page
@@ -526,7 +522,6 @@ class TestControllerIntegration:
 		assert result.is_done is True
 		assert result.error is None
 
-	@pytest.mark.asyncio
 	async def test_drag_drop_action(self, controller, browser_session, base_url, http_server):
 		"""Test that DragDropAction correctly drags and drops elements."""
 		# Set up drag and drop test page for this test
@@ -754,7 +749,6 @@ class TestControllerIntegration:
 
 		assert drag_succeeded, "Drag and drop events weren't fired correctly"
 
-	@pytest.mark.asyncio
 	async def test_send_keys_action(self, controller, browser_session, base_url, http_server):
 		"""Test SendKeysAction using a controlled local HTML file."""
 		# Set up keyboard test page for this test
@@ -958,7 +952,6 @@ class TestControllerIntegration:
 		input_value = await page.evaluate('() => document.getElementById("textInput").value')
 		assert input_value == test_text, "Input value shouldn't have changed after tabbing"
 
-	@pytest.mark.asyncio
 	async def test_get_dropdown_options(self, controller, browser_session, base_url, http_server):
 		"""Test that get_dropdown_options correctly retrieves options from a dropdown."""
 		# Add route for dropdown test page
@@ -1069,7 +1062,6 @@ class TestControllerIntegration:
 				f"Option at index {i} has wrong value: expected '{expected['value']}', got '{actual['value']}'"
 			)
 
-	@pytest.mark.asyncio
 	async def test_select_dropdown_option(self, controller, browser_session, base_url, http_server):
 		"""Test that select_dropdown_option correctly selects an option from a dropdown."""
 		# Add route for dropdown test page
@@ -1144,7 +1136,103 @@ class TestControllerIntegration:
 		selected_value = await page.evaluate("document.getElementById('test-dropdown').value")
 		assert selected_value == 'option2'  # Second Option has value "option2"
 
-	@pytest.mark.asyncio
+	async def test_extract_content_action(self, controller, browser_session, base_url, http_server):
+		"""Test the default extract_content action with mixed parameter ordering."""
+		# Set up a test page with specific content
+		http_server.expect_request('/extract-test').respond_with_data(
+			"""
+			<!DOCTYPE html>
+			<html>
+			<head>
+				<title>Extract Content Test Page</title>
+			</head>
+			<body>
+				<h1>Product Details</h1>
+				<div class="product">
+					<h2>Awesome Widget</h2>
+					<p class="price">$19.99</p>
+					<p class="description">This is an amazing widget that does everything!</p>
+					<a href="/buy-now">Buy Now</a>
+					<a href="/reviews">Read Reviews</a>
+				</div>
+				<div class="features">
+					<h3>Features:</h3>
+					<ul>
+						<li>Feature 1: Super fast</li>
+						<li>Feature 2: Easy to use</li>
+						<li>Feature 3: Lifetime warranty</li>
+					</ul>
+				</div>
+			</body>
+			</html>
+			""",
+			content_type='text/html',
+		)
+
+		# Navigate to the test page
+		goto_action = {'go_to_url': GoToUrlAction(url=f'{base_url}/extract-test')}
+
+		class GoToUrlActionModel(ActionModel):
+			go_to_url: GoToUrlAction | None = None
+
+		await controller.act(GoToUrlActionModel(**goto_action), browser_session)
+
+		# Verify extract_content is registered
+		assert 'extract_content' in controller.registry.registry.actions
+
+		# Create a mock LLM for testing
+		from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+		mock_llm = FakeListChatModel(
+			responses=['Product: Awesome Widget, Price: $19.99, Description: Amazing widget with 3 key features']
+		)
+
+		# Test extract_content with include_links=False (default)
+		extract_action = {'extract_content': {'goal': 'Extract product name and price'}}
+
+		class ExtractContentActionModel(ActionModel):
+			extract_content: dict | None = None
+
+		# This should fail if page_extraction_llm is not passed correctly
+		with pytest.raises(RuntimeError) as exc_info:
+			await controller.act(ExtractContentActionModel(**extract_action), browser_session)
+
+		# Should fail because page_extraction_llm is required but not provided
+		assert 'page_extraction_llm' in str(exc_info.value)
+
+		# Now test with the LLM provided through controller context
+		# Since controller doesn't have a way to pass page_extraction_llm directly,
+		# we'll test that the action is properly registered with correct parameters
+		action = controller.registry.registry.actions['extract_content']
+
+		# Verify the param model only includes user-facing parameters
+		model_fields = action.param_model.model_fields
+		assert 'goal' in model_fields
+		assert 'include_links' in model_fields
+		assert model_fields['include_links'].default is False
+
+		# Special params should NOT be in the model
+		assert 'page' not in model_fields
+		assert 'page_extraction_llm' not in model_fields
+
+		# Verify the function signature includes the expected parameters
+		import inspect
+
+		sig = inspect.signature(action.function)
+		# The normalized function should have params and kwargs
+		assert 'params' in sig.parameters
+		assert 'kwargs' in sig.parameters
+
+		# Test with include_links=True
+		extract_action_with_links = {
+			'extract_content': {'goal': 'Extract all product information including links', 'include_links': True}
+		}
+
+		# Verify the action model can be created with these parameters
+		action_model = ExtractContentActionModel(**extract_action_with_links)
+		assert action_model.extract_content['goal'] == 'Extract all product information including links'
+		assert action_model.extract_content['include_links'] is True
+
 	async def test_click_element_by_index(self, controller, browser_session, base_url, http_server):
 		"""Test that click_element_by_index correctly clicks an element and handles different outcomes."""
 		# Add route for clickable elements test page
@@ -1250,3 +1338,107 @@ class TestControllerIntegration:
 		# Verify the click actually had an effect on the page
 		result_text = await page.evaluate("document.getElementById('result').textContent")
 		assert result_text == expected_result_text, f"Expected result text '{expected_result_text}', got '{result_text}'"
+
+	async def test_empty_css_selector_fallback(self, controller, browser_session, httpserver):
+		"""Test that clicking elements with empty CSS selectors falls back to XPath."""
+		# Create a test page with an element that would produce an empty CSS selector
+		# This could happen with elements that have no tag name or unusual XPath structures
+		httpserver.expect_request('/empty_css_test').respond_with_data(
+			"""
+			<html>
+			<head><title>Empty CSS Selector Test</title></head>
+			<body>
+				<div id="container">
+					<!-- Element with minimal attributes that might produce empty CSS selector -->
+					<custom-element>Click Me</custom-element>
+					<div id="result">Not clicked</div>
+				</div>
+				<script>
+					// Add click handler to the custom element
+					document.querySelector('custom-element').addEventListener('click', function() {
+						document.getElementById('result').textContent = 'Clicked!';
+					});
+				</script>
+			</body>
+			</html>
+			""",
+			content_type='text/html',
+		)
+
+		# Navigate to the test page
+		page = await browser_session.get_current_page()
+		await page.goto(httpserver.url_for('/empty_css_test'))
+		await page.wait_for_load_state()
+
+		# Get the page state which includes clickable elements
+		state = await browser_session.get_state_summary(cache_clickable_elements_hashes=False)
+
+		# Find the custom element index
+		custom_element_index = None
+		for index, element in state.selector_map.items():
+			if element.tag_name == 'custom-element':
+				custom_element_index = index
+				break
+
+		assert custom_element_index is not None, 'Could not find custom-element in selector map'
+
+		# Mock a scenario where CSS selector generation returns empty string
+		# by temporarily patching the method (we'll test the actual fallback behavior)
+		original_method = browser_session._enhanced_css_selector_for_element
+		empty_css_called = False
+
+		def mock_css_selector(element, include_dynamic_attributes=True):
+			nonlocal empty_css_called
+			# Return empty string for our custom element to trigger fallback
+			if element.tag_name == 'custom-element':
+				empty_css_called = True
+				return ''
+			return original_method(element, include_dynamic_attributes)
+
+		# Temporarily replace the method
+		browser_session._enhanced_css_selector_for_element = mock_css_selector
+
+		try:
+			# Create click action for the custom element
+			click_action = {'click_element_by_index': ClickElementAction(index=custom_element_index)}
+
+			class ClickActionModel(ActionModel):
+				click_element_by_index: ClickElementAction | None = None
+
+			# Execute the click - should use XPath fallback
+			result = await controller.act(ClickActionModel(**click_action), browser_session)
+
+			# Verify the click succeeded
+			assert result.error is None, f'Click failed with error: {result.error}'
+			assert result.success is True, 'Click was not successful'
+			assert empty_css_called, 'CSS selector method was not called'
+
+			# Verify the element was actually clicked by checking the result
+			result_text = await page.evaluate("document.getElementById('result').textContent")
+			assert result_text == 'Clicked!', f'Element was not clicked, result text: {result_text}'
+
+		finally:
+			# Restore the original method
+			browser_session._enhanced_css_selector_for_element = original_method
+
+	async def test_go_to_url_network_error(self, controller, browser_session):
+		"""Test that go_to_url handles network errors gracefully instead of throwing hard errors."""
+		# Create action model for go_to_url with an invalid domain
+		action_data = {'go_to_url': GoToUrlAction(url='https://www.nonexistentdndbeyond.com/')}
+
+		# Create the ActionModel instance
+		class GoToUrlActionModel(ActionModel):
+			go_to_url: GoToUrlAction | None = None
+
+		action_model = GoToUrlActionModel(**action_data)
+
+		# Execute the action - should return soft error instead of throwing
+		result = await controller.act(action_model, browser_session)
+
+		# Verify the result
+		assert isinstance(result, ActionResult)
+		assert result.success is False, 'Expected success=False for network error'
+		assert result.error is not None, 'Expected error message to be set'
+		assert 'Site unavailable' in result.error, f"Expected 'Site unavailable' in error message, got: {result.error}"
+		assert 'nonexistentdndbeyond.com' in result.error, 'Expected URL in error message'
+		assert result.include_in_memory is True, 'Network errors should be included in memory'
