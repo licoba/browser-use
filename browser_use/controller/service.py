@@ -86,7 +86,7 @@ class Controller(Generic[Context]):
 			search_url = f'https://www.google.com/search?q={params.query}&udm=14'
 
 			page = await browser_session.get_current_page()
-			if page.url in ('about:blank', 'https://www.google.com'):
+			if page.url.strip('/') == 'https://www.google.com':
 				await page.goto(search_url)
 				await page.wait_for_load_state()
 			else:
@@ -98,15 +98,35 @@ class Controller(Generic[Context]):
 
 		@self.registry.action('Navigate to URL in the current tab', param_model=GoToUrlAction)
 		async def go_to_url(params: GoToUrlAction, browser_session: BrowserSession):
-			page = await browser_session.get_current_page()
-			if page:
-				await page.goto(params.url)
-				await page.wait_for_load_state()
-			else:
-				page = await browser_session.create_new_tab(params.url)
-			msg = f'🔗  Navigated to {params.url}'
-			logger.info(msg)
-			return ActionResult(extracted_content=msg, include_in_memory=True)
+			try:
+				page = await browser_session.get_current_page()
+				if page:
+					await page.goto(params.url)
+					await page.wait_for_load_state()
+				else:
+					page = await browser_session.create_new_tab(params.url)
+				msg = f'🔗  Navigated to {params.url}'
+				logger.info(msg)
+				return ActionResult(extracted_content=msg, include_in_memory=True)
+			except Exception as e:
+				error_msg = str(e)
+				# Check for network-related errors
+				if any(
+					err in error_msg
+					for err in [
+						'ERR_NAME_NOT_RESOLVED',
+						'ERR_INTERNET_DISCONNECTED',
+						'ERR_CONNECTION_REFUSED',
+						'ERR_TIMED_OUT',
+						'net::',
+					]
+				):
+					site_unavailable_msg = f'Site unavailable: {params.url} - {error_msg}'
+					logger.warning(site_unavailable_msg)
+					return ActionResult(success=False, error=site_unavailable_msg, include_in_memory=True)
+				else:
+					# Re-raise non-network errors
+					raise
 
 		@self.registry.action('Go back', param_model=NoParamsAction)
 		async def go_back(params: NoParamsAction, browser_session: BrowserSession):
@@ -128,8 +148,24 @@ class Controller(Generic[Context]):
 		async def click_element_by_index(params: ClickElementAction, browser_session: BrowserSession):
 			# Browser is now a BrowserSession itself
 
-			if params.index not in await browser_session.get_selector_map():
-				raise Exception(f'Element with index {params.index} does not exist - retry or use alternative actions')
+			# Check if element exists in current selector map
+			selector_map = await browser_session.get_selector_map()
+			if params.index not in selector_map:
+				# Force a state refresh in case the cache is stale
+				logger.info(f'Element with index {params.index} not found in selector map, refreshing state...')
+				await browser_session.get_state_summary(
+					cache_clickable_elements_hashes=True
+				)  # This will refresh the cached state
+				selector_map = await browser_session.get_selector_map()
+
+				if params.index not in selector_map:
+					# Return informative message with the new state instead of error
+					max_index = max(selector_map.keys()) if selector_map else -1
+					return ActionResult(
+						extracted_content=f'Element with index {params.index} does not exist. Page has {len(selector_map)} interactive elements (indices 0-{max_index}). State has been refreshed - please use the updated element indices.',
+						include_in_memory=True,
+						success=False,
+					)
 
 			element_node = await browser_session.get_dom_element_by_index(params.index)
 			initial_pages = len(browser_session.tabs)
@@ -138,7 +174,7 @@ class Controller(Generic[Context]):
 			if await browser_session.find_file_upload_element_by_index(params.index) is not None:
 				msg = f'Index {params.index} - has an element which opens file upload dialog. To upload files please use a specific function to upload files '
 				logger.info(msg)
-				return ActionResult(extracted_content=msg, include_in_memory=True)
+				return ActionResult(extracted_content=msg, include_in_memory=True, success=False)
 
 			msg = None
 
@@ -156,10 +192,19 @@ class Controller(Generic[Context]):
 					msg += f' - {new_tab_msg}'
 					logger.info(new_tab_msg)
 					await browser_session.switch_to_tab(-1)
-				return ActionResult(extracted_content=msg, include_in_memory=True)
+				return ActionResult(extracted_content=msg, include_in_memory=True, success=True)
 			except Exception as e:
-				logger.warning(f'Element not clickable with index {params.index} - most likely the page changed')
-				return ActionResult(error=str(e))
+				error_msg = str(e)
+				if 'Execution context was destroyed' in error_msg or 'Cannot find context with specified id' in error_msg:
+					# Page navigated during click - refresh state and return it
+					logger.info('Page context changed during click, refreshing state...')
+					await browser_session.get_state_summary(cache_clickable_elements_hashes=True)
+					return ActionResult(
+						error='Page navigated during click. Refreshed state provided.', include_in_memory=True, success=False
+					)
+				else:
+					logger.warning(f'Element not clickable with index {params.index} - most likely the page changed')
+					return ActionResult(error=error_msg, success=False)
 
 		@self.registry.action(
 			'Input text into a input interactive element',
@@ -181,8 +226,7 @@ class Controller(Generic[Context]):
 
 		# Save PDF
 		@self.registry.action('Save the current page as a PDF file')
-		async def save_pdf(browser_session: BrowserSession):
-			page = await browser_session.get_current_page()
+		async def save_pdf(page: Page):
 			short_url = re.sub(r'^https?://(?:www\.)?|/$', '', page.url)
 			slug = re.sub(r'[^a-zA-Z0-9]+', '-', short_url).strip('-').lower()
 			sanitized_filename = f'{slug}.pdf'
@@ -197,17 +241,21 @@ class Controller(Generic[Context]):
 		@self.registry.action('Switch tab', param_model=SwitchTabAction)
 		async def switch_tab(params: SwitchTabAction, browser_session: BrowserSession):
 			await browser_session.switch_to_tab(params.page_id)
-			# Wait for tab to be ready and ensure references are synchronized
 			page = await browser_session.get_current_page()
-			await page.wait_for_load_state()
-			msg = f'🔄  Switched to tab {params.page_id}'
+			try:
+				await page.wait_for_load_state(state='domcontentloaded', timeout=5_000)
+				# page was already loaded when we first navigated, this is additional to wait for onfocus/onblur animations/ajax to settle
+			except Exception as e:
+				pass
+			msg = f'🔄  Switched to tab #{params.page_id} with url {page.url}'
 			logger.info(msg)
 			return ActionResult(extracted_content=msg, include_in_memory=True)
 
 		@self.registry.action('Open a specific url in new tab', param_model=OpenTabAction)
 		async def open_tab(params: OpenTabAction, browser_session: BrowserSession):
-			await browser_session.create_new_tab(params.url)
-			msg = f'🔗  Opened new tab with {params.url}'
+			page = await browser_session.create_new_tab(params.url)
+			tab_idx = browser_session.tabs.index(page)
+			msg = f'🔗  Opened new tab #{tab_idx} with url {params.url}'
 			logger.info(msg)
 			return ActionResult(extracted_content=msg, include_in_memory=True)
 
@@ -229,24 +277,41 @@ class Controller(Generic[Context]):
 		)
 		async def extract_content(
 			goal: str,
-			browser_session: BrowserSession,
+			page: Page,
 			page_extraction_llm: BaseChatModel,
 			include_links: bool = False,
 		):
-			page = await browser_session.get_current_page()
+			from functools import partial
+
 			import markdownify
 
 			strip = []
 			if not include_links:
 				strip = ['a', 'img']
 
-			content = markdownify.markdownify(await page.content(), strip=strip)
+			# Run markdownify in a thread pool to avoid blocking the event loop
+			loop = asyncio.get_event_loop()
+			page_html = await page.content()
+			markdownify_func = partial(markdownify.markdownify, strip=strip)
+			content = await loop.run_in_executor(None, markdownify_func, page_html)
 
 			# manually append iframe text into the content so it's readable by the LLM (includes cross-origin iframes)
 			for iframe in page.frames:
+				try:
+					await iframe.wait_for_load_state(timeout=5000)  # extra on top of already loaded page
+				except Exception as e:
+					pass
+
 				if iframe.url != page.url and not iframe.url.startswith('data:'):
 					content += f'\n\nIFRAME {iframe.url}:\n'
-					content += markdownify.markdownify(await iframe.content())
+					# Run markdownify in a thread pool for iframe content as well
+					try:
+						iframe_html = await iframe.content()
+						iframe_markdown = await loop.run_in_executor(None, markdownify_func, iframe_html)
+					except Exception as e:
+						logger.debug(f'Error extracting iframe content from within page {page.url}: {type(e).__name__}: {e}')
+						iframe_markdown = ''
+					content += iframe_markdown
 
 			prompt = 'Your task is to extract the content of the page. You will be given a page and a goal and you should extract all relevant information around this goal from the page. If the goal is vague, summarize the page. Respond in json format. Extraction goal: {goal}, Page: {page}'
 			template = PromptTemplate(input_variables=['goal', 'page'], template=prompt)
@@ -264,8 +329,7 @@ class Controller(Generic[Context]):
 		@self.registry.action(
 			'Get the accessibility tree of the page in the format "role name" with the number_of_elements to return',
 		)
-		async def get_ax_tree(number_of_elements: int, browser_session: BrowserSession):
-			page = await browser_session.get_current_page()
+		async def get_ax_tree(number_of_elements: int, page: Page):
 			node = await page.accessibility.snapshot(interesting_only=True)
 
 			def flatten_ax_tree(node, lines):
@@ -331,9 +395,7 @@ class Controller(Generic[Context]):
 			'Send strings of special keys like Escape,Backspace, Insert, PageDown, Delete, Enter, Shortcuts such as `Control+o`, `Control+Shift+T` are supported as well. This gets used in keyboard.press. ',
 			param_model=SendKeysAction,
 		)
-		async def send_keys(params: SendKeysAction, browser_session: BrowserSession):
-			page = await browser_session.get_current_page()
-
+		async def send_keys(params: SendKeysAction, page: Page):
 			try:
 				await page.keyboard.press(params.keys)
 			except Exception as e:
@@ -354,8 +416,7 @@ class Controller(Generic[Context]):
 		@self.registry.action(
 			description='If you dont find something which you want to interact with, scroll to it',
 		)
-		async def scroll_to_text(text: str, browser_session: BrowserSession):  # type: ignore
-			page = await browser_session.get_current_page()
+		async def scroll_to_text(text: str, page: Page):  # type: ignore
 			try:
 				# Try different locator strategies
 				locators = [
@@ -563,7 +624,7 @@ class Controller(Generic[Context]):
 			'Drag and drop elements or between coordinates on the page - useful for canvas drawing, sortable lists, sliders, file uploads, and UI rearrangement',
 			param_model=DragDropAction,
 		)
-		async def drag_drop(params: DragDropAction, browser_session: BrowserSession) -> ActionResult:
+		async def drag_drop(params: DragDropAction, page: Page) -> ActionResult:
 			"""
 			Performs a precise drag and drop operation between elements or coordinates.
 			"""
@@ -687,8 +748,6 @@ class Controller(Generic[Context]):
 				except Exception as e:
 					return False, f'Error during drag operation: {str(e)}'
 
-			page = await browser_session.get_current_page()
-
 			try:
 				# Initialize variables
 				source_x: int | None = None
@@ -774,9 +833,7 @@ class Controller(Generic[Context]):
 				return ActionResult(error=error_msg, include_in_memory=True)
 
 		@self.registry.action('Google Sheets: Get the contents of the entire sheet', domains=['https://docs.google.com'])
-		async def read_sheet_contents(browser_session: BrowserSession):
-			page = await browser_session.get_current_page()
-
+		async def read_sheet_contents(page: Page):
 			# select all cells
 			await page.keyboard.press('Enter')
 			await page.keyboard.press('Escape')
@@ -787,10 +844,10 @@ class Controller(Generic[Context]):
 			return ActionResult(extracted_content=extracted_tsv, include_in_memory=True)
 
 		@self.registry.action('Google Sheets: Get the contents of a cell or range of cells', domains=['https://docs.google.com'])
-		async def read_cell_contents(browser_session: BrowserSession, cell_or_range: str):
+		async def read_cell_contents(cell_or_range: str, browser_session: BrowserSession):
 			page = await browser_session.get_current_page()
 
-			await select_cell_or_range(browser_session, cell_or_range)
+			await select_cell_or_range(cell_or_range=cell_or_range, page=page)
 
 			await page.keyboard.press('ControlOrMeta+C')
 			await asyncio.sleep(0.1)
@@ -800,10 +857,10 @@ class Controller(Generic[Context]):
 		@self.registry.action(
 			'Google Sheets: Update the content of a cell or range of cells', domains=['https://docs.google.com']
 		)
-		async def update_cell_contents(browser_session: BrowserSession, cell_or_range: str, new_contents_tsv: str):
+		async def update_cell_contents(cell_or_range: str, new_contents_tsv: str, browser_session: BrowserSession):
 			page = await browser_session.get_current_page()
 
-			await select_cell_or_range(browser_session, cell_or_range)
+			await select_cell_or_range(cell_or_range=cell_or_range, page=page)
 
 			# simulate paste event from clipboard with TSV content
 			await page.evaluate(f"""
@@ -815,18 +872,16 @@ class Controller(Generic[Context]):
 			return ActionResult(extracted_content=f'Updated cells: {cell_or_range} = {new_contents_tsv}', include_in_memory=False)
 
 		@self.registry.action('Google Sheets: Clear whatever cells are currently selected', domains=['https://docs.google.com'])
-		async def clear_cell_contents(browser_session: BrowserSession, cell_or_range: str):
+		async def clear_cell_contents(cell_or_range: str, browser_session: BrowserSession):
 			page = await browser_session.get_current_page()
 
-			await select_cell_or_range(browser_session, cell_or_range)
+			await select_cell_or_range(cell_or_range=cell_or_range, page=page)
 
 			await page.keyboard.press('Backspace')
 			return ActionResult(extracted_content=f'Cleared cells: {cell_or_range}', include_in_memory=False)
 
 		@self.registry.action('Google Sheets: Select a specific cell or range of cells', domains=['https://docs.google.com'])
-		async def select_cell_or_range(browser_session: BrowserSession, cell_or_range: str):
-			page = await browser_session.get_current_page()
-
+		async def select_cell_or_range(cell_or_range: str, page: Page):
 			await page.keyboard.press('Enter')  # make sure we dont delete current cell contents if we were last editing
 			await page.keyboard.press('Escape')  # to clear current focus (otherwise select range popup is additive)
 			await asyncio.sleep(0.1)
@@ -846,9 +901,7 @@ class Controller(Generic[Context]):
 			'Google Sheets: Fallback method to type text into (only one) currently selected cell',
 			domains=['https://docs.google.com'],
 		)
-		async def fallback_input_into_single_selected_cell(browser_session: BrowserSession, text: str):
-			page = await browser_session.get_current_page()
-
+		async def fallback_input_into_single_selected_cell(text: str, page: Page):
 			await page.keyboard.type(text, delay=0.1)
 			await page.keyboard.press('Enter')  # make sure to commit the input so it doesn't get overwritten by the next action
 			await page.keyboard.press('ArrowUp')
